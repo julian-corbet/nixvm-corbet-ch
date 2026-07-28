@@ -3,9 +3,10 @@
 **A declarative home for persistent, hosted VM workloads on NixOS: libvirt/QEMU-KVM as
 a host stance, guest VMs as data.**
 
-The fleet has bare metal and it has k3s. `nixvm` is the third substrate: a machine that
-hosts real, persistent virtual machines with their own identity and storage — not
-ephemeral, not test infrastructure, not another container runtime.
+Most estates end up with bare metal and a container orchestrator, and nothing in between.
+`nixvm` is that third substrate: a machine that hosts real, persistent virtual machines with
+their own identity and storage — not ephemeral, not test infrastructure, not another
+container runtime.
 
 ## The pitch
 
