@@ -78,25 +78,6 @@ let
 
   guestType = lib.types.submodule {
     options = {
-      memoryMiB = lib.mkOption {
-        type = lib.types.nullOr lib.types.ints.positive;
-        default = null;
-        description = ''
-          How much RAM (MiB) this guest permanently claims from the host. NO
-          DEFAULT: memory handed to a guest is memory the host's other
-          workloads (and its own memory-pressure tuning) cannot use for as
-          long as the guest is defined, on a host that is never running only
-          this one VM -- a silently-guessed number is a resourcing decision
-          made without the operator noticing it was made.
-        '';
-      };
-
-      cpu.cores = lib.mkOption {
-        type = lib.types.ints.positive;
-        default = 2;
-        description = "Static vCPU count. CPU is overcommittable far more forgivingly than RAM, so this carries an ordinary default unlike memoryMiB.";
-      };
-
       cpu.model = lib.mkOption {
         type = lib.types.enum [ "host-passthrough" "host-model" ];
         default = "host-passthrough";
@@ -239,18 +220,15 @@ let
     };
   };
 
-  # EVAL SAFETY, same discipline as nixram's modules/default.nix: `memoryMiB`,
-  # `network.bridge` and a disk's `source` all have NO safe default (see their
-  # option docs), which means their value can legitimately be `null` while
-  # NixOS is still forcing `config` on the way to `system.build.toplevel` --
-  # well before, and independent of, whichever order `assertions` happens to
-  # be checked in. Indexing any of them directly would raise a raw, unhelpful
-  # Nix type error instead of this module's own friendly, guest-named
-  # assertion below. So every render path goes through a safe fallback here;
-  # the fallback values are never seen by a real user, because `assertions`
-  # is what actually stops the build.
-  effectiveMemoryMiB = guest: if guest.memoryMiB != null then guest.memoryMiB else 1;
-
+  # EVAL SAFETY, same discipline as nixlxc's own modules/containers: `network.bridge` and a
+  # disk's `source` have NO safe default at all (see their option docs); the guest's memory
+  # ceiling (sourced from nixhost, see below) can likewise legitimately resolve to nothing. All
+  # of these can be `null` while NixOS is still forcing `config` on the way to
+  # `system.build.toplevel` -- well before, and independent of, whichever order `assertions`
+  # happens to be checked in. Indexing any of them directly would raise a raw, unhelpful Nix
+  # type error instead of this module's own friendly, guest-named assertion below. So every
+  # render path goes through a safe fallback here; the fallback values are never seen by a real
+  # user, because `assertions` is what actually stops the build.
   effectiveBridge = guest:
     if guest.network.bridge != null then guest.network.bridge
     else if config.nixvm.host.bridge != null then config.nixvm.host.bridge
@@ -260,11 +238,72 @@ let
     (_: disk: disk // { source = if disk.source != null then disk.source else "/unset-disk-source"; })
     guest.disks;
 
+  # ── The resource envelope is NOT declared here. It is read from nixhost. ──────────────────
+  #
+  # An earlier draft of this module declared `memoryMiB` (required, no default) and `cpu.cores`
+  # (default 2) of its own. That is a fact with two owners: `nixhost` already declares
+  # `environments.<name>.resources.ram.limitMiB` and `.cpu.quotaCores`, and it owns the only
+  # arithmetic nothing else can do -- summing every environment's claim at each level of the
+  # tree and refusing to evaluate when a node's children claim more than that node has.
+  #
+  # A second ceiling here does not merely duplicate; it DISARMS that check. nixhost would go on
+  # summing numbers nobody rendered while this module rendered different ones, which is worse
+  # than having no assertion at all, because it reads as coverage. nixhost's own substrate
+  # contract states the rule: a substrate must not declare a second resource envelope.
+  #
+  # Matched BY NAME: `nixvm.guests.<name>` reads `nixhost.environments.<name>.resources`. Read
+  # defensively (`config.nixhost.environments or { }`) and never as a flake input, so this
+  # module's own assertions still get constructed -- cleanly, never a raw Nix crash -- on a host
+  # that has never imported nixhost at all.
+  #
+  # ⚠ MEMORY IS NOT THE SAME SHAPE AS nixlxc's IDENTICAL-LOOKING CEILING. nixlxc's cgroup2
+  # memory ceiling can be silently absent -- "no cgroup limit at all" is a real, valid liblxc
+  # state, so nixlxc renders nothing and evaluation proceeds. A libvirt domain has no
+  # equivalent, and this was checked empirically against the real libvirt XML parser rather than
+  # assumed: `virsh define` (against the `test:///default` driver, no running libvirtd needed) on
+  # a domain document with no `<vcpu>` element succeeds fine -- libvirt applies its own upstream
+  # default (a single vCPU) -- but the identical domain with no `<memory>` element is REFUSED
+  # outright: "error: XML error: Memory size must be specified via <memory> or in the <numa>
+  # configuration". So the two ceilings this module reads from nixhost diverge on what "absent"
+  # renders as:
+  #   - `resources.ram.limitMiB` absent (nixhost not imported, this guest not declared in it, or
+  #     declared without a limit) is a BUILD ERROR naming the missing option --
+  #     `memoryRequiredAssertions` below -- never a guessed number, and never a domain XML
+  #     document libvirt would refuse to define at apply time.
+  #   - `resources.cpu.quotaCores` absent means the `<vcpu>` element is omitted entirely, which
+  #     genuinely IS "no ceiling" here: libvirt's own upstream default applies, not a number this
+  #     module invented.
+  #   `quotaCores` may be fractional (nixhost's own type allows it -- a cgroup quota of 1.5 cores
+  #   is a real shape for other substrates); a libvirt `<vcpu>` count cannot be fractional, so a
+  #   fractional ceiling is rounded UP to the smallest whole vCPU count that can deliver at least
+  #   that much capacity. This module does not also throttle the guest to the exact fractional
+  #   figure via a `<cputune>` quota/period pair -- flagged here as a known gap, not silently
+  #   decided.
+  hostEnvs = config.nixhost.environments or { };
+  envelopeFor = name: (hostEnvs.${name} or { }).resources or null;
+
+  memoryEnvelopeMissing = name: let e = envelopeFor name; in e == null || e.ram.limitMiB == null;
+
+  effectiveMemoryMiB = name:
+    let e = envelopeFor name; in
+    # Eval-safety placeholder only -- see the comment above `effectiveBridge`. Never seen by a
+    # real user: `memoryRequiredAssertions` below is what actually stops the build whenever
+    # `memoryEnvelopeMissing name` is true.
+    if !(memoryEnvelopeMissing name) then e.ram.limitMiB else 1;
+
+  effectiveCpuQuotaCores = name:
+    let e = envelopeFor name; in if e == null then null else e.cpu.quotaCores;
+
+  effectiveVcpuCount = name:
+    let q = effectiveCpuQuotaCores name; in
+    if q == null then null else builtins.ceil (q * 1.0);
+
   mkGuestXml = name: guest: domainXml.mkDomainXML {
     inherit name;
     guest = guest // {
-      memoryMiB = effectiveMemoryMiB guest;
+      memoryMiB = effectiveMemoryMiB name;
       disks = effectiveDisks guest;
+      cpu = guest.cpu // { cores = effectiveVcpuCount name; };
     };
     bridge = effectiveBridge guest;
   };
@@ -272,11 +311,7 @@ let
   guestAssertions = lib.concatMap
     (name:
       let guest = cfg.${name}; in
-      lib.optional (guest.memoryMiB == null) {
-        assertion = false;
-        message = "nixvm.guests.${name}.memoryMiB must be set -- there is no default (see the option doc); a guest's memory allocation is never a value worth guessing.";
-      }
-      ++ lib.optional (guest.disks == { }) {
+      lib.optional (guest.disks == { }) {
         assertion = false;
         message = "nixvm.guests.${name} declares no disks -- add at least one entry to nixvm.guests.${name}.disks.";
       }
@@ -286,6 +321,66 @@ let
           message = "nixvm.guests.${name}.disks.${devName}.source must be set -- there is no default (see the option doc).";
         })
         (lib.attrNames guest.disks))
+    (lib.attrNames cfg);
+
+  # ── memory: ALWAYS required to resolve, present or not -- see the header block above for why
+  # this is the one ceiling with no safe "render nothing" fallback.
+  memoryRequiredAssertions = lib.concatMap
+    (name:
+      lib.optional (memoryEnvelopeMissing name) {
+        assertion = false;
+        message = ''
+          nixvm.guests.${name} has no RAM ceiling: nixhost.environments.${name}.resources.ram.limitMiB
+          is not set (or nixhost is not imported into this configuration at all). A libvirt
+          domain has no equivalent of "run unbounded" the way an LXC container or a podman
+          container can -- proven empirically against the real libvirt XML parser (`virsh
+          define` against the `test:///default` driver): a domain document with no `<memory>`
+          element is refused outright ("Memory size must be specified via <memory> or in the
+          <numa> configuration"), never merely under-specified. So unlike nixlxc's
+          identical-looking cgroup ceiling (silently absent means unbounded), this one has no
+          safe "render nothing" fallback -- set
+          nixhost.environments.${name}.resources.ram.limitMiB, either by importing nixhost
+          alongside this module or by declaring the environment if nixhost is already imported.
+        '';
+      })
+    (lib.attrNames cfg);
+
+  # ── Cross-check against nixhost: the two declarations must agree on WHAT this is ───────────
+  #
+  # `nixvm.guests.foo` and `nixhost.environments.foo` describe the same object from two sides --
+  # the substrate that builds it and the host that budgets for it. If nixhost has been told that
+  # `foo` is, say, an lxc container while this module is building it as a libvirt VM, one of
+  # those is wrong, and the consequence is not cosmetic: nixhost's envelope arithmetic would be
+  # budgeting for the wrong KIND of thing, and this module would silently read a ceiling meant
+  # for something else.
+  #
+  # Only checked when nixhost actually declares that name -- a guest with no corresponding
+  # environment is the ordinary un-adopted case (caught instead by `memoryRequiredAssertions`
+  # above), not this check's concern.
+  #
+  # `or null` alone is not enough here, unlike every other defensive read in this file: the real
+  # nixhost's own `kind` option carries NO default (see its own description -- deliberately, an
+  # environment nixhost "cannot classify" is one whose resource claims cannot be reasoned about
+  # at all). So a real deployment that declares `nixhost.environments.<name>` for its RAM/CPU
+  # envelope but genuinely forgets `kind` does not make `.kind` resolve to `null` the way a truly
+  # ABSENT environment does -- it makes reading `.kind` raise NixOS's own "option ... was
+  # accessed but has no value defined" error, which `or` does NOT catch (that idiom only catches
+  # a missing ATTRIBUTE, not an arbitrary `throw` raised while computing one that exists but was
+  # never given a value). `builtins.tryEval` is what actually catches it, so an environment
+  # declared without `kind` is treated the same as one not declared at all for THIS check --
+  # never a raw crash -- while `memoryRequiredAssertions` above still fires on its own terms if
+  # that same half-declared environment also left `ram.limitMiB` unset.
+  declaredKind = name:
+    let r = builtins.tryEval ((hostEnvs.${name} or { }).kind or null); in
+    if r.success then r.value else null;
+
+  kindAssertions = lib.concatMap
+    (name:
+      let declared = declaredKind name; in
+      lib.optional (declared != null && declared != "vm") {
+        assertion = false;
+        message = "nixvm.guests.${name} builds a libvirt VM, but nixhost.environments.${name}.kind = \"${declared}\". The same name is declared as two different kinds of thing: nixhost is budgeting an envelope for a ${declared} while this module defines a VM domain against it. Rename one, or correct the kind.";
+      })
     (lib.attrNames cfg);
 in
 {
@@ -310,7 +405,7 @@ in
           alongside modules/guests and set nixvm.host.enable = true.
         '';
       }
-    ] ++ guestAssertions;
+    ] ++ guestAssertions ++ memoryRequiredAssertions ++ kindAssertions;
 
     environment.etc = lib.mapAttrs'
       (name: guest: {

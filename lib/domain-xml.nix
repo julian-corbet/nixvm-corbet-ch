@@ -10,10 +10,13 @@
 # doesn't need.
 #
 # modules/guests/default.nix is the one caller in this repo. It supplies the realized
-# guest submodule value (every option already resolved to a concrete value -- this file
+# guest submodule value (every OPTION already resolved to a concrete value -- this file
 # never sees an unset option) and the ALREADY-RESOLVED bridge name (the guest's own
 # `network.bridge` override, or `nixvm.host.bridge`, resolved by the caller -- this file
-# does not repeat that fallback decision).
+# does not repeat that fallback decision). The one deliberate exception is `guest.cpu.cores`:
+# unlike an unset OPTION, it is a plain value the caller resolves against `nixhost` (see that
+# module's own header) and may legitimately hand this file `null`, meaning "no ceiling declared,
+# render no <vcpu> element at all" -- this file's own `vcpuLine` is where that is handled.
 { lib }:
 
 let
@@ -35,6 +38,18 @@ let
     '';
 
   macLine = mac: lib.optionalString (mac != null) "<mac address='${esc mac}'/>\n";
+
+  # Omittable, unlike `memoryMiB` below: `null` means "no ceiling declared" and libvirt's own
+  # upstream default (a single vCPU) applies -- see modules/guests' own header, right above
+  # `envelopeFor`, for why memory and vcpu diverge here. That divergence was checked against the
+  # real libvirt domain parser (`virsh define` against the `test:///default` driver), not
+  # assumed: a domain with no `<vcpu>` element defines fine; one with no `<memory>` element does
+  # not, which is why `memoryMiB` below carries no equivalent `optionalString` guard -- the
+  # caller in modules/guests/default.nix guarantees it is never `null` by the time it reaches
+  # here (an eval-safety placeholder standing in until that module's own assertions stop the
+  # build for real).
+  vcpuLine = cores: lib.optionalString (cores != null)
+    "<vcpu placement='static'>${toString cores}</vcpu>\n  ";
 
   # No GPU passthrough anywhere in this template, on purpose -- see modules/guests'
   # own SCOPE block for why. tpm-crb + the "2.0" backend version is what a guest
@@ -65,8 +80,7 @@ in
         <name>${esc name}</name>
         <memory unit='MiB'>${toString guest.memoryMiB}</memory>
         <currentMemory unit='MiB'>${toString guest.memoryMiB}</currentMemory>
-        <vcpu placement='static'>${toString guest.cpu.cores}</vcpu>
-        <os${osFirmwareAttr guest.firmware}>
+        ${vcpuLine guest.cpu.cores}<os${osFirmwareAttr guest.firmware}>
           <type arch='x86_64' machine='q35'>hvm</type>
         </os>
         <features>

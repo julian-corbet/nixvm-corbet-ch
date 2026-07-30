@@ -19,10 +19,14 @@ pair of NixOS modules:
   network devices attach to, optional file-backed storage pools. Every fact this module
   reads (a bridge, a directory) already exists; it never partitions, formats, or
   creates anything.
-- **What guests does it run?** (`modules/guests`) — per-guest cpu/memory/disks/
-  network/firmware/tpm/graphics/autostart as typed options, rendered to a real libvirt
-  domain XML document and kept declared (`virsh define`, `virsh autostart`) on every
-  activation.
+- **What guests does it run?** (`modules/guests`) — per-guest disks/network/firmware/
+  tpm/graphics/autostart as typed options, rendered to a real libvirt domain XML
+  document and kept declared (`virsh define`, `virsh autostart`) on every activation.
+  The RAM/CPU resource envelope is deliberately not one of this module's own options —
+  it's read from `nixhost.environments.<name>.resources`, matched by name, so the one
+  place that sums every environment's claim against what a host actually has stays the
+  only place that does. See `modules/guests/README.md`'s "The resource envelope"
+  section.
 
 Neither module starts, stops, or reboots a guest. Declaring a guest's definition is
 this repo's job; deciding when it actually runs is the operator's.

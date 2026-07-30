@@ -2,6 +2,10 @@
 # defined, used by the `guests-module-evaluates` check and by the render-content checks
 # that inspect the generated domain XML. Every value is generic; nothing here names a
 # real host, bridge, pool, or device.
+#
+# The resource envelope (RAM, vCPU count) is read from `nixhost.environments.<name>`,
+# matched by name -- modules/guests declares no ceiling option of its own. See
+# modules/guests/README.md's own "The resource envelope" section for why.
 { ... }:
 {
   nixvm.host = {
@@ -9,9 +13,13 @@
     bridge = "examplebr0";
   };
 
+  nixhost.environments.example-guest = {
+    kind = "vm";
+    resources.ram.limitMiB = 8192;
+    resources.cpu.quotaCores = 4;
+  };
+
   nixvm.guests.example-guest = {
-    memoryMiB = 8192;
-    cpu.cores = 4;
     disks.vda.source = "/dev/zvol/pool/example-guest";
   };
 
