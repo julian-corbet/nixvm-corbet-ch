@@ -3,7 +3,7 @@
 **A declarative home for persistent, hosted VM workloads on NixOS: libvirt/QEMU-KVM as
 a host stance, guest VMs as data.**
 
-Most estates end up with bare metal and a container orchestrator, and nothing in between.
+Most deployments end up with bare metal and a container orchestrator, and nothing in between.
 `nixvm` is that third substrate: a machine that hosts real, persistent virtual machines with
 their own identity and storage — not ephemeral, not test infrastructure, not another
 container runtime.
@@ -58,7 +58,7 @@ guests. Ephemeral test VMs are a different domain entirely, owned by nixpkgs its
 two must never share a hypervisor layer: the day `nixvm` offers to "also run the
 tests" is the day both domains rot, because `nixtest` would inherit standing
 infrastructure it was designed not to need, and `nixvm` would inherit a scheduling
-concern that belongs to this fleet's build/deploy platform, not to a VM-hosting module.
+concern that belongs to this project's build/deploy platform, not to a VM-hosting module.
 If you are looking for ephemeral CI test VMs, this is not that repo, on purpose.
 
 **vs. `nixoffice` — nixoffice is what the guest runs; nixvm is how it's hosted.**
@@ -72,7 +72,7 @@ this repo's field of view. Neither repo imports the other.
 **vs. `nixk3s` — sibling substrates, not a hierarchy.** `nixk3s` splits "the host
 platform" (`k3s-host`) from "what runs on it" (`tenancy`); `nixvm` mirrors that shape
 exactly (`vm-host` / `guests`) for a different substrate. They compose on the same
-fleet without either one depending on the other — a host can run k3s, host VMs, both,
+host without either one depending on the other — a host can run k3s, host VMs, both,
 or neither.
 
 ## What ships

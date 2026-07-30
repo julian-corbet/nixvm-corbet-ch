@@ -16,7 +16,7 @@
 #           what a guest WILL boot into next time it starts; it never touches a guest
 #           that is already running. Powering a guest on or off is always an operator
 #           action (`virsh start`/`virsh shutdown`/virt-manager) -- the same reasoning
-#           this fleet applies everywhere else to anything that could interrupt a
+#           this family applies everywhere else to anything that could interrupt a
 #           running workload without warning.
 #   NOT   : installer media. A first OS install commonly needs a cdrom device holding
 #           an ISO; this first cut has no option surface for that. Attach one
