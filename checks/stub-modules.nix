@@ -32,4 +32,18 @@
       default = { };
     };
   };
+
+  # THE DECOY: nixhost's real option surface, renamed. Composes the SAME top-level `nixhost`
+  # namespace the real sibling would (so `config ? nixhost` reads true -- state (a), "not
+  # composed at all", must NOT be what this fixture exercises), with the specific path
+  # `modules/guests/default.nix`'s own probe reads (`environments`) missing, renamed to a
+  # plausible neighbour -- proving state (c), composed-but-moved, actually warns through the
+  # real module (see `checks/default.nix`'s `fact-wiring/*` group).
+  hostEnvironmentsRenamedStub = { ... }: {
+    options.nixhost.workloads = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+      description = "Stand-in for nixhost having renamed environments to workloads.";
+    };
+  };
 }

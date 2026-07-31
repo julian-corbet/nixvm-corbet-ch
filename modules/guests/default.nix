@@ -36,6 +36,7 @@
 # importing vm-host fails evaluation the moment `nixvm.guests` is non-empty, the same
 # "required composition, never a silent dependency" contract nixboot's own CONTRACT.md
 # states for the lanzaboote module (its behavior B12).
+{ probeFact }:
 { lib, config, ... }:
 
 let
@@ -252,9 +253,17 @@ let
   # contract states the rule: a substrate must not declare a second resource envelope.
   #
   # Matched BY NAME: `nixvm.guests.<name>` reads `nixhost.environments.<name>.resources`. Read
-  # defensively (`config.nixhost.environments or { }`) and never as a flake input, so this
-  # module's own assertions still get constructed -- cleanly, never a raw Nix crash -- on a host
-  # that has never imported nixhost at all.
+  # through `lib.probeFact` (consumed from nixhost -- see flake.nix's own input comment, and this
+  # module's outer `{ probeFact }:` argument, for why this repo no longer vendors `lib/facts.nix`
+  # itself) rather than a bare `config.nixhost.environments or { }`. This CONFIG read is still not
+  # a flake input -- probing `nixhost.environments` never requires this repo's flake to import
+  # nixhost's own module -- so this module's own assertions still get constructed -- cleanly,
+  # never a raw Nix crash -- on a host that has never imported nixhost at all. The bare form this
+  # replaced could not tell "nixhost not imported here" (silent, correct) from "nixhost IS
+  # imported but `environments` itself moved or was renamed" (a defect, previously just as
+  # silent) -- both landed on the identical `{ }` fallback. A rename now additionally warns
+  # (`config.warnings` below), even on a host with no guest declared at all -- see
+  # `checks/default.nix`'s `fact-wiring/*` group for the proof.
   #
   # ⚠ MEMORY IS NOT THE SAME SHAPE AS nixlxc's IDENTICAL-LOOKING CEILING. nixlxc's cgroup2
   # memory ceiling can be silently absent -- "no cgroup limit at all" is a real, valid liblxc
@@ -279,7 +288,13 @@ let
   #   that much capacity. This module does not also throttle the guest to the exact fractional
   #   figure via a `<cputune>` quota/period pair -- flagged here as a known gap, not silently
   #   decided.
-  hostEnvs = config.nixhost.environments or { };
+  nixhostEnvironmentsProbe = probeFact {
+    inherit config;
+    namespace = "nixhost";
+    path = [ "environments" ];
+    fallback = { };
+  };
+  hostEnvs = nixhostEnvironmentsProbe.value;
   envelopeFor = name: (hostEnvs.${name} or { }).resources or null;
 
   memoryEnvelopeMissing = name: let e = envelopeFor name; in e == null || e.ram.limitMiB == null;
@@ -406,6 +421,13 @@ in
         '';
       }
     ] ++ guestAssertions ++ memoryRequiredAssertions ++ kindAssertions;
+
+    # THE SHARED READ CONTRACT'S OWN OUTPUT: state (c) on `nixhost.environments` -- composed but
+    # renamed -- warns here even when no guest currently matches any declared environment, the
+    # case `memoryRequiredAssertions`/`kindAssertions` above can never catch because nothing
+    # forces either to look. See `nixhostEnvironmentsProbe`'s own comment above and
+    # `checks/default.nix`'s `fact-wiring/*` group for the proof.
+    warnings = nixhostEnvironmentsProbe.warnings;
 
     environment.etc = lib.mapAttrs'
       (name: guest: {

@@ -19,7 +19,13 @@
 #      and modules/guests/default.nix's own header for why memory, unlike CPU, has no
 #      safe "render nothing" fallback, checked empirically against the real libvirt
 #      domain parser), and a cross-check that nixhost and this repo agree on what KIND
-#      of thing a given name is.
+#      of thing a given name is. The "fact-wiring/*" group at the bottom proves
+#      `lib.probeFact` (consumed from nixhost's own `lib/facts.nix` via this repo's `nixhost`
+#      flake input, see flake.nix) actually distinguishes "nixhost not composed at all" from
+#      "nixhost composed but
+#      `environments` renamed" THROUGH this real module -- the ambiguity nixvm's own
+#      pre-existing memoryRequiredAssertions message could not resolve on its own (see
+#      that group's own header).
 #
 # Nothing here builds a VM, starts libvirtd, or runs a single line of the rendered
 # script. That is exactly the boundary this repo exists to keep: nixvm declares and
@@ -122,6 +128,29 @@ let
   }];
 
   xmlTextOf = cfg: name: cfg.environment.etc."nixvm/guests/${name}.xml".text;
+
+  # ── fact-wiring fixtures: `lib.probeFact` proven THROUGH the real `modules/guests` ──────
+  #
+  # One guest declared in every fixture below (`cfg != { }`), so `config.warnings` is actually
+  # computed -- but `.warnings` is a plain attribute read, never `system.build.toplevel`, so it
+  # evaluates the same whether or not the fixture's OWN, unrelated `memoryRequiredAssertions`
+  # would also fail the build (see that assertion's own header: a libvirt guest cannot omit
+  # `<memory>`, so unlike nixlxc's identical-looking ceiling, nixvm's own ram requirement is
+  # loud on BOTH "nixhost absent" and "nixhost renamed" already, before `lib.probeFact` was ever
+  # adopted). What `lib.probeFact` adds is a signal that tells the two apart, which the ambiguous
+  # pre-existing assertion message ("... is not set (or nixhost is not imported ...)") could not:
+  # state (a) must still warn zero times; state (c) must warn exactly once, naming the option.
+  quietGuest = name: {
+    nixvm.host = { enable = true; bridge = "examplebr0"; };
+    nixvm.guests.${name}.disks.vda.source = "/dev/zvol/pool/${name}";
+  };
+
+  cfg-facts-no-nixhost-at-all = evalNixos [ (quietGuest "example-guest") ];
+
+  cfg-facts-nixhost-renamed = evalNixos [
+    stubs.hostEnvironmentsRenamedStub
+    (quietGuest "example-guest")
+  ];
 
   results = [
     # --- host-only composes -------------------------------------------------------
@@ -451,6 +480,28 @@ let
         ])
       )
       "expected an environment declared with a real-nixhost-shaped (no-default) `kind` left unset, but ram.limitMiB set, to evaluate cleanly -- reading `.kind` must never raw-crash the kind cross-check")
+
+    # ══ fact-wiring: lib.probeFact through the real module, not just lib/facts.nix's own ══
+    (check "fact-wiring/all-siblings-faithful-has-no-warnings"
+      (cfg-one-guest.warnings == [ ])
+      "got warnings=${builtins.toJSON cfg-one-guest.warnings}, expected none: nixhost composed with its real, un-renamed shape and a full envelope must produce zero warnings")
+
+    (check "fact-wiring/no-nixhost-composed-has-no-warnings"
+      (cfg-facts-no-nixhost-at-all.warnings == [ ])
+      "got warnings=${builtins.toJSON cfg-facts-no-nixhost-at-all.warnings}, expected none: state (a) -- nixhost never imported at all -- must stay silent even though the SEPARATE, pre-existing memoryRequiredAssertions correctly still fails this guest's build for its own, unrelated reason")
+
+    (check "fact-wiring/nixhost-environments-renamed-warns-exactly-once"
+      (
+        let w = cfg-facts-nixhost-renamed.warnings; in
+        lib.length w == 1
+        && lib.hasInfix "nixhost.environments" (lib.head w)
+        && lib.hasInfix "nixhost" (lib.head w)
+      )
+      "got warnings=${builtins.toJSON cfg-facts-nixhost-renamed.warnings}, expected exactly one, naming nixhost.environments -- the decoy renames it to nixhost.workloads while nixhost itself IS composed. This is the one this whole group exists for: before lib.probeFact, this exact case was indistinguishable from state (a) above -- both silently produced the same ambiguous assertion message and no way to tell them apart")
+
+    (check "fact-wiring/nixhost-environments-renamed-still-fails-for-its-own-unrelated-mandatory-ram-reason"
+      (buildFails [ stubs.hostEnvironmentsRenamedStub (quietGuest "example-guest") ])
+      "expected the build to still fail here too -- NOT because lib.probeFact ever asserts (it defaults to mode = \"warn\", never \"assert\", for this read) but because nixvm's own memoryRequiredAssertions correctly has nothing to resolve against either way. Adopting lib.probeFact must not have silently loosened that pre-existing requirement")
   ];
 
   # ── Pure xml-render checks: no nixosSystem at all --------------------------------

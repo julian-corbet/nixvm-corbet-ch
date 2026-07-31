@@ -48,10 +48,25 @@ tree and refusing to evaluate when a node's children claim more than that node h
 second ceiling here would not duplicate that check, it would **disarm** it: nixhost
 would keep summing numbers nobody rendered while this module rendered different ones.
 So this module reads the envelope instead, matched **by name**
-(`nixvm.guests.<name>` ↔ `nixhost.environments.<name>`), defensively
-(`config.nixhost.environments or { }`) and never as a flake input — a host that has
-never imported nixhost still evaluates, at least as far as this module's own
-assertions (see below).
+(`nixvm.guests.<name>` ↔ `nixhost.environments.<name>`), through `lib.probeFact`
+(`lib/facts.nix`, consumed from [nixhost](https://github.com/julian-corbet/nixhost-corbet-ch) via
+this repo's own `nixhost` flake input — see that file's own header for the full defect-class
+writeup) rather than a bare `config.nixhost.environments or { }`. The CONFIG read itself is still
+never a flake input — a host that has never imported nixhost still evaluates, at least as far as
+this module's own assertions (see below).
+
+**Why not the bare `or` form.** A bare `config.nixhost.environments or { }` cannot tell "nixhost
+was never imported here" from "nixhost IS imported, but `environments` itself moved or was
+renamed underneath this exact read" — both land on the identical `{ }` fallback. Both ALSO
+already fail this module's own build today, for the unrelated, correct reason below (a guest
+with no resolvable ram ceiling always fails) — so the rename was never silently *unsafe* here
+the way it would be for a fact with a safe empty default. It WAS silently *ambiguous*: the
+pre-existing assertion message ("... is not set (or nixhost is not imported ...)") could not
+say which one happened. `lib.probeFact` adds the signal that can: state (a) (not imported)
+produces zero warnings, and state (c) (imported, renamed) produces exactly one, naming the
+option path, the namespace, and the fallback in use — proven in `checks/default.nix`'s
+`fact-wiring/*` group through the real module, not only against `lib/facts.nix`'s own
+function-level behaviour.
 
 **Memory and CPU diverge on what "absent" means**, checked empirically against the
 real libvirt domain parser (`virsh define` against the `test:///default` driver, no
