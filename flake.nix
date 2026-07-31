@@ -6,17 +6,15 @@
   # nixhost IS an input, for exactly one thing: `lib.probeFact` (github:julian-corbet/
   # nixhost-corbet-ch, `lib/facts.nix`) -- the shared, plain-function fix for the cross-namespace
   # defensive-read defect class `modules/guests/default.nix`'s own `nixhostEnvironmentsProbe`
-  # leans on (see nixhost's own `lib/facts.nix` header). This repo used to vendor a
-  # byte-identical copy of that file; it is now consumed instead, the same "one recipe, not a
-  # second copy" fix nixvault/nixnas already applied to the f2fs catalogue they both used to
-  # vendor. `probeFact` is closed over as a plain function argument (below), never
-  # `_module.args` -- the same partially-applied-before-the-module-system-sees-it pattern this
-  # family already uses for `nixfsCatalogue` (see infra's own flake.nix comment on `mkNixnas`
-  # for that precedent) -- so a consumer importing `nixosModules.guests` sees an ordinary module
-  # function and never needs to know `nixhost` exists. This is unrelated to how
-  # `nixhost.environments` itself is read: that stays a defensive, zero-flake-dependency probe,
-  # exactly as before -- only the `probeFact` MECHANISM itself is now consumed rather than
-  # vendored.
+  # leans on (see nixhost's own `lib/facts.nix` header). One recipe, not a second copy -- the
+  # same fix nixvault/nixnas apply to their own shared f2fs catalogue. `probeFact` is closed over
+  # as a plain function argument (below), never `_module.args` -- the same
+  # partially-applied-before-the-module-system-sees-it pattern this family already uses for
+  # `nixfsCatalogue` (see infra's own flake.nix comment on `mkNixnas` for that precedent) -- so a
+  # consumer importing `nixosModules.guests` sees an ordinary module function and never needs to
+  # know `nixhost` exists. This is unrelated to how `nixhost.environments` itself is read: that
+  # stays a defensive, zero-flake-dependency probe -- only the `probeFact` MECHANISM itself is
+  # consumed rather than vendored.
   inputs.nixhost = {
     url = "github:julian-corbet/nixhost-corbet-ch";
     inputs.nixpkgs.follows = "nixpkgs";

@@ -241,10 +241,9 @@ let
 
   # ── The resource envelope is NOT declared here. It is read from nixhost. ──────────────────
   #
-  # An earlier draft of this module declared `memoryMiB` (required, no default) and `cpu.cores`
-  # (default 2) of its own. That is a fact with two owners: `nixhost` already declares
-  # `environments.<name>.resources.ram.limitMiB` and `.cpu.quotaCores`, and it owns the only
-  # arithmetic nothing else can do -- summing every environment's claim at each level of the
+  # Declaring `memoryMiB`/`cpu.cores` here would be a fact with two owners: `nixhost` already
+  # declares `environments.<name>.resources.ram.limitMiB` and `.cpu.quotaCores`, and it owns the
+  # only arithmetic nothing else can do -- summing every environment's claim at each level of the
   # tree and refusing to evaluate when a node's children claim more than that node has.
   #
   # A second ceiling here does not merely duplicate; it DISARMS that check. nixhost would go on
@@ -254,8 +253,8 @@ let
   #
   # Matched BY NAME: `nixvm.guests.<name>` reads `nixhost.environments.<name>.resources`. Read
   # through `lib.probeFact` (consumed from nixhost -- see flake.nix's own input comment, and this
-  # module's outer `{ probeFact }:` argument, for why this repo no longer vendors `lib/facts.nix`
-  # itself) rather than a bare `config.nixhost.environments or { }`. This CONFIG read is still not
+  # module's outer `{ probeFact }:` argument) rather than a bare `config.nixhost.environments or
+  # { }`. This CONFIG read is still not
   # a flake input -- probing `nixhost.environments` never requires this repo's flake to import
   # nixhost's own module -- so this module's own assertions still get constructed -- cleanly,
   # never a raw Nix crash -- on a host that has never imported nixhost at all. The bare form this
