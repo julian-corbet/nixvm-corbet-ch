@@ -301,8 +301,8 @@ let
   effectiveMemoryMiB = name:
     let e = envelopeFor name; in
     # Eval-safety placeholder only -- see the comment above `effectiveBridge`. Never seen by a
-    # real user: `memoryRequiredAssertions` below is what actually stops the build whenever
-    # `memoryEnvelopeMissing name` is true.
+      # real user: `memoryRequiredAssertions` below is what actually stops the build whenever
+      # `memoryEnvelopeMissing name` is true.
     if !(memoryEnvelopeMissing name) then e.ram.limitMiB else 1;
 
   effectiveCpuQuotaCores = name:
@@ -325,16 +325,49 @@ let
   guestAssertions = lib.concatMap
     (name:
       let guest = cfg.${name}; in
-      lib.optional (guest.disks == { }) {
-        assertion = false;
-        message = "nixvm.guests.${name} declares no disks -- add at least one entry to nixvm.guests.${name}.disks.";
-      }
+      lib.optional (guest.disks == { })
+        {
+          assertion = false;
+          message = "nixvm.guests.${name} declares no disks -- add at least one entry to nixvm.guests.${name}.disks.";
+        }
       ++ lib.concatMap
         (devName: lib.optional (guest.disks.${devName}.source == null) {
           assertion = false;
           message = "nixvm.guests.${name}.disks.${devName}.source must be set -- there is no default (see the option doc).";
         })
         (lib.attrNames guest.disks))
+    (lib.attrNames cfg);
+
+  # ── The bridge requirement belongs HERE, not on the host ────────────────────────────────────
+  #
+  # It used to be an assertion on `nixvm.host.enable` itself: enabling the hypervisor stance
+  # without naming a bridge failed the build. That was wrong in a way that only showed up once
+  # this repo grew a second plane. A host with NO bridge is a complete, correct hypervisor -- it
+  # is every laptop on wireless, where bridging onto the physical link is not a thing the
+  # hardware does, and where an ad-hoc guest attaches to libvirt's own default NAT network
+  # instead. Requiring a bridge from `enable` meant such a host could only be declared by naming
+  # an interface that does not exist, which is precisely the silent-strand failure the
+  # `nixvm.host.bridge` option doc warns about.
+  #
+  # What genuinely cannot be null is the bridge a DECLARED guest attaches to, because that value
+  # is rendered verbatim into a domain document. So the requirement moves to the point of use,
+  # and it now names the guest rather than the host -- which is also the more useful message, on
+  # a host with several guests where only one of them declines to say.
+  bridgeAssertions = lib.concatMap
+    (name:
+      let guest = cfg.${name}; in
+      lib.optional (guest.network.bridge == null && config.nixvm.host.bridge == null) {
+        assertion = false;
+        message = ''
+          nixvm.guests.${name} has no bridge to attach to: neither
+          nixvm.guests.${name}.network.bridge nor nixvm.host.bridge is set. A libvirt domain's
+          <source bridge='...'/> is rendered verbatim, so there is no value this module could
+          substitute that would not silently strand the guest without network the moment `virsh
+          define` runs. Set nixvm.host.bridge to the bridge this host's own network config
+          already brings up (nixvm never creates one), or give this one guest its own
+          network.bridge.
+        '';
+      })
     (lib.attrNames cfg);
 
   # ── memory: ALWAYS required to resolve, present or not -- see the header block above for why
@@ -419,7 +452,7 @@ in
           alongside modules/guests and set nixvm.host.enable = true.
         '';
       }
-    ] ++ guestAssertions ++ memoryRequiredAssertions ++ kindAssertions;
+    ] ++ guestAssertions ++ bridgeAssertions ++ memoryRequiredAssertions ++ kindAssertions;
 
     # THE SHARED READ CONTRACT'S OWN OUTPUT: state (c) on `nixhost.environments` -- composed but
     # renamed -- warns here even when no guest currently matches any declared environment, the

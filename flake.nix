@@ -1,5 +1,5 @@
 {
-  description = "A declarative home for persistent, hosted VM workloads on NixOS -- libvirt/QEMU-KVM host stance plus guest definitions as data. The peer of nixk3s: nixk3s is bare metal running k3s, nixvm is bare metal running VMs, and neither owns the other.";
+  description = "A declarative home for VM workloads -- a libvirt/QEMU-KVM host stance for NixOS and for distro hosts via system-manager, plus persistent guest definitions as data. The peer of nixk3s: nixk3s is bare metal running k3s, nixvm is bare metal running VMs, and neither owns the other.";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -27,9 +27,11 @@
       forAllSystems = f: lib.genAttrs systems f;
     in
     {
-      # The hypervisor host: libvirtd, the declared bridge guests attach to, optional
-      # file-backed storage pools. See modules/vm-host/default.nix's own SCOPE block.
-      nixosModules.vm-host = ./modules/vm-host;
+      # The hypervisor host on NixOS: libvirtd, the architecture-selected QEMU, the declared
+      # bridge guests attach to, optional file-backed storage pools. The policy it implements
+      # lives in modules/vm-host/vm-host.nix, whose SCOPE block is the one to read; this entry is
+      # the NixOS DELIVERY of it.
+      nixosModules.vm-host = ./modules/vm-host/nixos.nix;
 
       # Guest VM definitions, as data, rendered to libvirt domain XML and kept declared.
       # See modules/guests/default.nix's own SCOPE block -- and its "ALWAYS COMPOSED
@@ -42,10 +44,27 @@
 
       nixosModules.default = { imports = [ self.nixosModules.vm-host self.nixosModules.guests ]; };
 
+      # The SAME hypervisor stance on a distro host managed by system-manager. Not a reduced
+      # NixOS module: it is the other delivery of the one policy file, and it sets nothing that
+      # only exists on NixOS -- see modules/vm-host/arch.nix's own header for the list of what it
+      # deliberately does not touch, and checks/default.nix's "arch-plane/*" group for the proof
+      # that the list is accurate rather than aspirational.
+      #
+      # There is NO systemManagerModules.guests, and that is a boundary rather than an omission:
+      # modules/guests renders `virsh define` units against `virtualisation.libvirtd.package` and
+      # reads its resource envelope from nixhost. A distro host runs guests it created by hand.
+      systemManagerModules.vm-host = ./modules/vm-host/arch.nix;
+      systemManagerModules.default = ./modules/vm-host/arch.nix;
+
       # The pure XML-rendering function, exposed so a consumer can inspect or unit-test
       # it without composing a full NixOS system -- same reasoning as nixfs exposing its
       # catalogue.
       lib.mkDomainXML = (import ./lib/domain-xml.nix { inherit lib; }).mkDomainXML;
+
+      # The toolchain catalogue and the pure channel resolution, for the same reason: a consumer
+      # can ask what a selection resolves to on either plane without evaluating a system.
+      lib.toolchain = import ./lib/toolchain.nix { };
+      lib.resolve = import ./lib/resolve.nix { inherit lib; };
 
       checks = forAllSystems (system:
         import ./checks {
@@ -53,6 +72,7 @@
           inherit lib system;
           vmHostModule = self.nixosModules.vm-host;
           guestsModule = self.nixosModules.guests;
+          archModule = self.systemManagerModules.vm-host;
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);

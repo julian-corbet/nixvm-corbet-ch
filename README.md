@@ -1,24 +1,26 @@
 # nixvm
 
-**A declarative home for persistent, hosted VM workloads on NixOS: libvirt/QEMU-KVM as
-a host stance, guest VMs as data.**
+**A declarative home for VM workloads: libvirt/QEMU-KVM as a host stance — on NixOS and on
+distro hosts via system-manager — and persistent guest VMs as data.**
 
 Most deployments end up with bare metal and a container orchestrator, and nothing in between.
-`nixvm` is that third substrate: a machine that hosts real, persistent virtual machines with
-their own identity and storage — not ephemeral, not test infrastructure, not another
-container runtime.
+`nixvm` is that third substrate: a machine that hosts real virtual machines — the persistent
+kind with their own identity and storage, and the ad-hoc kind you spin up on a laptop because
+you need one for an afternoon.
 
 ## The pitch
 
 Running libvirt/QEMU-KVM by hand is easy and exactly what gets forgotten about a year
 later: which bridge a guest was on, whether its disk was a zvol or a file, whether
-autostart was ever set. `nixvm` packages the two questions that matter as one small
-pair of NixOS modules:
+autostart was ever set, and — the one that costs real disk — which of QEMU's thirty
+target architectures the box ended up carrying. `nixvm` packages the two questions that
+matter as one small pair of modules:
 
-- **Can this host run guests at all?** (`modules/vm-host`) — libvirtd, the bridge guest
-  network devices attach to, optional file-backed storage pools. Every fact this module
-  reads (a bridge, a directory) already exists; it never partitions, formats, or
-  creates anything.
+- **Can this host run guests at all?** (`modules/vm-host`) — the daemon, a QEMU built for
+  the architectures the host actually asked for, optional tooling, the bridge guest network
+  devices attach to, aliases for remote libvirtd instances, optional file-backed storage
+  pools. Every fact this module reads (a bridge, a directory) already exists; it never
+  partitions, formats, or creates anything.
 - **What guests does it run?** (`modules/guests`) — per-guest disks/network/firmware/
   tpm/graphics/autostart as typed options, rendered to a real libvirt domain XML
   document and kept declared (`virsh define`, `virsh autostart`) on every activation.
@@ -31,11 +33,35 @@ pair of NixOS modules:
 Neither module starts, stops, or reboots a guest. Declaring a guest's definition is
 this repo's job; deciding when it actually runs is the operator's.
 
+## Two planes, one policy
+
+`vm-host` serves NixOS **and** any distro host managed by
+[system-manager](https://github.com/numtide/system-manager). Those are two separate
+`evalModules` runs with no option in common: NixOS has `virtualisation.libvirtd`;
+system-manager has no `virtualisation` namespace at all, no `boot`, and no `fileSystems`.
+So the policy is written once (`modules/vm-host/vm-host.nix`) and delivered twice — as
+`virtualisation.libvirtd` on NixOS, and as a published pacman/AUR package list on a distro
+host, where nixvm installs nothing and the host's own reconciler does the work.
+
+The claim "the distro backend sets nothing NixOS-only" is enforced rather than asserted:
+`nix flake check` evaluates it against a stand-in for system-manager's option surface, so
+reaching for an option that plane does not have fails the check. The same group proves the
+stand-in is strict, so none of it can pass vacuously.
+
+`modules/guests` is NixOS-only, and that is a boundary rather than an omission — it renders
+`virsh define` units against `virtualisation.libvirtd.package` and reads a resource envelope
+from `nixhost`. A distro host runs guests it made by hand.
+
 ## Decisions this repo has already made
 
 - **libvirt + QEMU/KVM**, not `microvm.nix` and not `cloud-hypervisor`. The driving
   workload is a Windows guest: a Windows kernel needs a real VM, and both of those
   alternatives target minimal Linux guests — neither is a Windows host.
+- **The host's own architecture, and nothing else, unless asked.** `qemu-full` on Arch and
+  the top-level `qemu` in nixpkgs both build every target QEMU has — roughly 600 MiB of
+  emulators and firmware for architectures nobody on the box owns hardware for. The default
+  here is the x86-only path on both planes; foreign architectures are named one at a time in
+  `nixvm.host.foreignArchitectures`.
 - **No GPU passthrough.** The host's discrete GPU is shared platform hardware other
   workloads depend on; a VM cannot hold a device exclusively and still share it. The
   guest this repo was built for is reached over RDP, which needs no GPU inside the
@@ -44,8 +70,14 @@ this repo's job; deciding when it actually runs is the operator's.
 - **zvol-backed guest disks are the PRIMARY storage mode** — a zvol handed to a guest
   directly as a raw block device, no libvirt storage pool involved. File-backed qcow2
   disks (`nixvm.host.storagePools`) are the secondary mode.
-- **Bridged networking onto an existing host bridge**, never a NAT layer. `nixvm.host`
-  declares which bridge; it never creates one.
+- **Bridged networking for DECLARED guests, onto an existing host bridge this repo never
+  creates.** A host with no bridge at all is still a complete configuration, though: that
+  is every laptop on wireless, and its ad-hoc guests use libvirt's own default NAT network.
+  The bridge requirement therefore belongs to the guest that needs one, not to the host.
+- **A remote hypervisor is a URI, not a package.** `qemu+ssh://` needs nothing installed on
+  either end beyond libvirt itself, so `nixvm.host.remotes` is configuration —
+  rendered as libvirt's own `uri_aliases`, to the path the local libvirt's `sysconfdir`
+  actually points at, which is not the same path on both planes.
 - **A known gotcha, encoded, not just remembered**: a zvol used under a foreign
   filesystem (e.g. a file-backed storage pool's directory) needs the `nossd` mount
   option, or btrfs applies SSD heuristics on top of a device already doing its own
@@ -81,28 +113,37 @@ or neither.
 
 ## What ships
 
-- **`vm-host`** (`nixosModules.vm-host`) — the hypervisor stance: libvirtd, the
-  declared guest-network bridge, optional file-backed storage pools.
+- **`vm-host`** (`nixosModules.vm-host`, `systemManagerModules.vm-host`) — the hypervisor
+  stance on either plane: the daemon, the architecture-selected QEMU, optional tooling, the
+  declared guest-network bridge, remote-libvirtd aliases, optional file-backed storage
+  pools.
 - **`guests`** (`nixosModules.guests`) — guest VM definitions as data, rendered to
-  libvirt domain XML and kept declared. Always composed alongside `vm-host` — see its
-  own README for why that composition is required, not just conventional.
+  libvirt domain XML and kept declared. NixOS only. Always composed alongside `vm-host` —
+  see its own README for why that composition is required, not just conventional.
 - **`nixosModules.default`** — both together, for the common case.
+  **`systemManagerModules.default`** — `vm-host` alone, which is the whole of this repo on
+  that plane.
 - **`lib.mkDomainXML`** — the pure XML-rendering function `guests` is built on,
   exposed for inspection or reuse without a NixOS evaluation (mirrors `nixfs` exposing
   its own catalogue).
+- **`lib.toolchain` / `lib.resolve`** — the per-plane package catalogue and the pure
+  channel resolution, so a consumer can ask what a selection resolves to without
+  evaluating a system.
 - **[docs/gotchas.md](docs/gotchas.md)** — the zvol/`nossd` incident and the
   Windows/`localtime` clock offset, written down so neither gets rediscovered.
 
 ## Status
 
-**First cut, freshly built — a clean slate, not a migration.** No libvirt state
-survives from any earlier era; this repo starts from an idle KVM stack with nothing
-defined on top of it. `nix flake check` proves both modules compose into a real NixOS
-system and render correct libvirt domain XML from typed guest data — and, just as
-deliberately, that a host missing its required bridge, a guest missing its memory
-allocation or its disks, and the zvol/`nossd` gotcha with `nossd` actually missing, all
-fail evaluation by name rather than producing something half-formed. Nothing here has
-yet hosted a guest on real hardware; that is the next step, not this one.
+**A clean slate, not a migration.** No libvirt state survives from any earlier era; this
+repo starts from an idle KVM stack with nothing defined on top of it. `nix flake check`
+proves the modules compose into a real NixOS system, that the distro backend evaluates
+against system-manager's own option surface and reaches for nothing outside it, that the
+x86-only default resolves to the x86-only QEMU on both planes while a named selection adds
+exactly what was named — and, just as deliberately, that a declared guest with no bridge
+anywhere, a guest missing its memory allocation or its disks, a malformed remote alias, and
+the zvol/`nossd` gotcha with `nossd` actually missing, all fail evaluation by name rather
+than producing something half-formed. Nothing here has yet hosted a guest on real hardware;
+that is the next step, not this one.
 
 ## License
 
