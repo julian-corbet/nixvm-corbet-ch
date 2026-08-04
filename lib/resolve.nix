@@ -1,40 +1,61 @@
 #
-# The channel resolution: pure functions from a selection to the per-plane outputs a backend
-# consumes. No module system, no `pkgs`, no `config` -- so `../checks/default.nix` can drive
-# every branch with fixture tables containing entry shapes the real catalogue does not happen to
-# have today.
+# The channel resolution: pure functions from a list of selected catalogue entries to the
+# per-plane outputs a backend consumes. No module system, no `pkgs`, no `config` -- so
+# `../checks/default.nix` can drive every branch with fixture tables containing entry shapes the
+# real catalogue does not happen to have today.
 #
-# WHY THAT SEPARATION IS NOT DECORATION. The real catalogue in ./toolchain.nix has no AUR entry
-# in it, so `archPackages` and `aurPackages` return exactly the same thing against it whether the
-# AUR split works or is a no-op. A test that can only reach these functions THROUGH the real
-# catalogue therefore cannot tell a working split from a broken one -- and the failure mode of a
-# broken one is not subtle: `pacman -S` handed an AUR name fails the whole transaction on "target
-# not found", taking every other package in the same converge down with it. The fixtures in
-# `checks/default.nix` are the inputs that distinguish them.
+# WHY THAT SEPARATION IS NOT DECORATION, the same reasoning the sibling nixfs/nixoffice versions
+# of this file give: the real catalogue in ./toolchain.nix has no `aur = true` row and no
+# `arch = null` row, so `archPackages`/`aurPackages` and `nixpkgsPackages`/`unavailableOnArch`
+# return identical results against it whether their splits work or are no-ops. A test that can
+# only reach these functions THROUGH the real catalogue therefore cannot tell a working split from
+# a broken one -- and the failure mode is not subtle: `pacman -S` handed an AUR name fails the
+# whole transaction on "target not found", taking every other package in the same converge down
+# with it.
+#
+# THE ANTI-SHADOWING INVARIANT LIVES IN THESE FOUR FUNCTIONS, and it has a different shape on each
+# plane:
+#
+#   Arch  -- `archPackages ++ aurPackages` covers every entry that HAS a pacman name, and
+#            `unavailableOnArch` is the disjoint remainder that the Arch backend may install from
+#            nixpkgs. No entry is ever in both, so no tool is ever installed twice.
+#   NixOS -- `nixpkgsPackages` excludes `viaLibvirtd` rows, because `virtualisation.libvirtd`
+#            already delivers those and the QEMU it EXECS is the one named by
+#            `virtualisation.libvirtd.qemu.package`. A second copy in `environment.systemPackages`
+#            would be a differently-configured binary nothing ever runs.
 { lib }:
 rec {
   # Official-repo pacman names. `aur = true` entries are held back for `aurPackages` below.
-  archPackages = entries:
+  archPackages = selected:
     lib.unique (map (t: t.arch)
-      (lib.filter (t: (t.arch or null) != null && !(t.aur or false)) entries));
+      (lib.filter (t: (t.arch or null) != null && !(t.aur or false)) selected));
 
-  aurPackages = entries:
+  aurPackages = selected:
     lib.unique (map (t: t.arch)
-      (lib.filter (t: (t.arch or null) != null && (t.aur or false)) entries));
+      (lib.filter (t: (t.arch or null) != null && (t.aur or false)) selected));
 
-  # nixpkgs attribute paths. A `null` here is a POSITIVE statement -- "the NixOS plane gets this
-  # from `virtualisation.libvirtd` rather than from a package list" -- see ./toolchain.nix's own
-  # header. Dropping it silently is therefore correct, unlike a null pacman name, which would be
-  # a genuine catalogue defect and is checked for separately.
-  nixpkgsNames = entries:
+  # Entries with no Arch package at all -- official repo OR AUR. These are the ONLY ones an Arch
+  # host may install from nixpkgs, because they are the only ones where no distro copy exists to
+  # shadow or be shadowed by. Gated on the missing `arch` field and nothing else: which other
+  # channels an entry happens to carry says nothing about whether Arch can install it.
+  unavailableOnArch = selected:
+    lib.unique (map (t: t.name) (lib.filter (t: (t.arch or null) == null) selected));
+
+  # The nixpkgs attribute names the NixOS backend puts in `environment.systemPackages`.
+  #
+  # TWO exclusions, and they mean opposite things. `nixpkgs == null` is an entry nixpkgs has no
+  # package for at all (every `architectures` row). `viaLibvirtd` is an entry nixpkgs DOES have and
+  # that NixOS must nevertheless not install this way, because `virtualisation.libvirtd` is
+  # already delivering it -- see this file's header.
+  nixpkgsPackages = selected:
     lib.unique (map (t: t.nixpkgs)
-      (lib.filter (t: (t.nixpkgs or null) != null) entries));
+      (lib.filter (t: (t.nixpkgs or null) != null && !(t.viaLibvirtd or false)) selected));
 
   # The `--target-list=` QEMU is configured with, de-duplicated: several catalogue keys can
-  # legitimately name the same target (and the native targets are always present regardless of
-  # what was selected).
-  qemuTargets = nativeTargets: entries:
-    lib.unique (nativeTargets ++ lib.concatMap (a: a.qemuTargets) entries);
+  # legitimately name the same target, and the native targets are always present regardless of
+  # what was selected.
+  qemuTargets = nativeTargets: selected:
+    lib.unique (nativeTargets ++ lib.concatMap (a: a.qemuTargets or [ ]) selected);
 
   # ── Remote libvirtd connections ─────────────────────────────────────────────────────────────
   #

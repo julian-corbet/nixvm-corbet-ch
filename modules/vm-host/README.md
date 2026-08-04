@@ -27,7 +27,33 @@ Three files, one policy:
 | `nixvm.host.storagePools.<name>.zvolBacked` | bool | `false` | Does `path` sit on a filesystem backed by a ZFS zvol (not a native dataset)? See [../../docs/gotchas.md](../../docs/gotchas.md). |
 
 Read-only outputs: `archPackages`, `aurPackages` (wire both to the host's own reconciler on
-a distro plane) and `nixpkgsPackages`.
+a distro plane), `nixpkgsPackages` and `unavailableOnArch`.
+
+## The catalogue, and why nothing is installed twice
+
+Every entry in `lib/toolchain.nix` names itself on both channels — `arch` and `nixpkgs` —
+the same shape as the sibling `nixdev`/`nixoffice`/`nixfs` catalogues. Four rows disagree
+across channels and none of the disagreements is guessable: `cloud-image-utils`/`cloud-utils`,
+`virt-install`/`virt-manager` (two pacman packages, one nixpkgs derivation),
+`qemu-desktop`/`qemu_kvm`, and the 18 `qemu-system-<arch>` rows, for which nixpkgs has **no**
+package at all (`nixpkgs = null` — a foreign architecture there is a `--target-list` entry).
+
+**No host ends up with two copies of one tool**, and each plane gets that wrong differently:
+
+- **Arch** — `/usr/sbin` precedes the system-manager Nix profile on `PATH`, so a nixpkgs copy
+  of something pacman also has is the copy that *loses*. An entry with a pacman name is
+  published for the reconciler and installed from nowhere by this flake; only `arch = null`
+  entries (`unavailableOnArch`) come from nixpkgs. `aur = true` marks a name that is real on
+  Arch but not in an official repo — a valid Arch source, held back only because `pacman -S`
+  fails the whole transaction on an AUR name.
+- **NixOS** — `virtualisation.libvirtd` already delivers libvirt, its QEMU, swtpm and dnsmasq,
+  and the QEMU it *execs* is `virtualisation.libvirtd.qemu.package`. Those rows are marked
+  `viaLibvirtd = true` and excluded from `nixpkgsPackages`; a second copy in
+  `environment.systemPackages` would be a differently-configured binary nothing ever runs.
+
+`nix flake check` asserts both directions on the live catalogue: the Arch backend installs
+an empty list from nixpkgs, `archPackages ++ aurPackages` covers every selected entry, and no
+`viaLibvirtd` row reaches the NixOS install list.
 
 ## x86-64 only, by default
 

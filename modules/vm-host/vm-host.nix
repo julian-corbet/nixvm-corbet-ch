@@ -255,12 +255,33 @@ in
       type = lib.types.listOf lib.types.str;
       readOnly = true;
       description = ''
-        The stance as nixpkgs attribute names. Consumed by ./nixos.nix; exposed rather than kept
-        internal so a consumer can see what the stance resolves to without building a system.
+        The nixpkgs attribute names a NixOS host installs into `environment.systemPackages`.
+        Exposed rather than kept internal so a consumer can see what a selection resolves to
+        without building a system.
 
-        Shorter than `archPackages` on purpose: entries whose catalogue row carries
-        `nixpkgs = null` are delivered on NixOS by `virtualisation.libvirtd` itself rather than
-        by a package list -- see lib/toolchain.nix's header.
+        Shorter than `archPackages` on purpose, and for two different reasons. An entry whose row
+        carries `nixpkgs = null` has no nixpkgs package at all (every foreign architecture: there
+        is no per-architecture QEMU package, only a `--target-list` entry). An entry marked
+        `viaLibvirtd` DOES have one, and is still excluded, because `virtualisation.libvirtd`
+        already delivers it -- installing a second copy alongside would put a
+        differently-configured QEMU in the closure that nothing ever execs. See
+        lib/toolchain.nix's "WE DO NOT SHADOW" header.
+      '';
+    };
+
+    unavailableOnArch = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      description = ''
+        Selections with no Arch package at all -- neither an official repo nor the AUR -- named by
+        their catalogue key. These are the ONLY entries an Arch host may install from nixpkgs,
+        because they are the only ones with no distro copy to shadow or be shadowed by (on a live
+        Arch host `/usr/sbin` precedes the system-manager Nix profile on `PATH`, so the nixpkgs
+        copy is the one that loses).
+
+        Empty for this catalogue today: all 28 pacman names resolve in an official repo. The
+        option exists because a future entry may genuinely be nixpkgs-only, and because the
+        emptiness is worth being able to check rather than assume.
       '';
     };
 
@@ -276,7 +297,8 @@ in
     nixvm.host.want = if cfg.enable then allSelected else [ ];
     nixvm.host.archPackages = resolve.archPackages config.nixvm.host.want;
     nixvm.host.aurPackages = resolve.aurPackages config.nixvm.host.want;
-    nixvm.host.nixpkgsPackages = resolve.nixpkgsNames config.nixvm.host.want;
+    nixvm.host.nixpkgsPackages = resolve.nixpkgsPackages config.nixvm.host.want;
+    nixvm.host.unavailableOnArch = resolve.unavailableOnArch config.nixvm.host.want;
     nixvm.host.qemuTargets = resolve.qemuTargets [ ] selectedArches;
 
     assertions =

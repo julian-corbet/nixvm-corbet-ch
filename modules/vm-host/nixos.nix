@@ -20,21 +20,30 @@ let
     lib.optional pkgs.stdenv.hostPlatform.isx86_64 "i386-softmmu"
     ++ [ "${pkgs.stdenv.hostPlatform.qemuArch}-softmmu" ];
 
-  # THE x86-ONLY ANSWER ON THIS PLANE, and it is `qemu_kvm`, not `qemu`. The top-level `qemu`
-  # attribute leaves `hostCpuTargets` at null, which configures `--target-list` with EVERY target
-  # QEMU can build -- the nixpkgs equivalent of Arch's `qemu-full`. `pkgs.qemu_kvm` is precisely
-  # `qemu.override { hostCpuOnly = true; }`, i.e. the host's own targets and nothing else, and it
-  # is an ordinary nixpkgs attribute, so it comes from the binary cache.
+  # THE x86-ONLY ANSWER ON THIS PLANE, read from the CATALOGUE rather than spelled here: the
+  # `daemon.qemu` row names `qemu_kvm` as this channel's x86-only QEMU, exactly as it names
+  # `qemu-desktop` for the other one, and a backend that hard-coded its own answer would be a
+  # second place for the two channels to disagree.
+  #
+  # Why that attribute and not `qemu`: the top-level `qemu` leaves `hostCpuTargets` at null, which
+  # configures `--target-list` with EVERY target QEMU can build -- the nixpkgs equivalent of
+  # Arch's `qemu-full`. `qemu_kvm` is precisely `qemu.override { hostCpuOnly = true; }`, i.e. the
+  # host's own targets and nothing else, and it is an ordinary nixpkgs attribute, so it comes from
+  # the binary cache.
   #
   # The non-empty case cannot reuse it: `hostCpuOnly` computes its own target list and offers no
-  # way to add to it, so asking for named extras means passing `hostCpuTargets` directly. That
-  # produces a derivation nothing upstream builds (different pname, different configure flags),
-  # so it compiles locally -- stated in `foreignArchitectures`' own option doc, because a build
-  # that takes twenty minutes should not be a surprise discovered at deploy time.
+  # way to add to it, so asking for named extras means passing `hostCpuTargets` directly, applied
+  # to the SAME derivation the catalogue row's attribute is an override of. That produces a
+  # derivation nothing upstream builds (different pname, different configure flags), so it
+  # compiles locally -- stated in `foreignArchitectures`' own option doc, because a build that
+  # takes twenty minutes should not be a surprise discovered at deploy time.
+  cat = import ../../lib/toolchain.nix { };
+  baseQemu = lib.getAttrFromPath (lib.splitString "." cat.daemon.qemu.nixpkgs) pkgs;
+
   qemuPackage =
     if cfg.foreignArchitectures == [ ]
-    then pkgs.qemu_kvm
-    else pkgs.qemu.override { hostCpuTargets = lib.unique (nativeTargets ++ cfg.qemuTargets); };
+    then baseQemu
+    else baseQemu.override { hostCpuOnly = false; hostCpuTargets = lib.unique (nativeTargets ++ cfg.qemuTargets); };
 
   # `hasAttrByPath` alone is not enough and this is not hypothetical: nixpkgs carries attributes
   # that exist as a `throw`, so the path resolves while forcing the value raises. Only forcing
@@ -93,9 +102,12 @@ in
       # module the one place that owns "can libvirtd on this host do X at all".
       virtualisation.libvirtd.qemu.swtpm.enable = lib.mkDefault true;
 
-      # libvirt, virsh, QEMU and netcat are already on the system path from the libvirtd module
-      # itself -- this list is the `tools` selection and nothing else, which is exactly why every
-      # `daemon` row in the catalogue carries `nixpkgs = null`.
+      # The `tools` selection and nothing else. libvirt, its QEMU, swtpm and dnsmasq are already
+      # delivered by `virtualisation.libvirtd` -- which is what `viaLibvirtd` marks in the
+      # catalogue, and why `nixpkgsPackages` filters those rows out. Installing them here as well
+      # would put a SECOND, differently-configured QEMU in the closure that libvirtd never execs
+      # (it runs `virtualisation.libvirtd.qemu.package`) -- the same shadowing defect the Arch
+      # backend avoids one plane over, for a different underlying reason.
       environment.systemPackages = map (n: lib.getAttrFromPath (lib.splitString "." n) pkgs) usable;
 
       warnings = lib.optional (broken != [ ])

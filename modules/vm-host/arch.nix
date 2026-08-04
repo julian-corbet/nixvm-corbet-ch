@@ -1,9 +1,22 @@
 # modules/vm-host/arch.nix
 #
-# The Arch/system-manager backend. Publishes the stance as pacman names, renders the storage-pool
-# apply units and the remote-connection aliases -- and installs nothing, because on a distro
-# plane nixvm has no installer to call. Packages arrive through whatever reconciler the host
-# runs, and wiring one in here would couple a general flake to one consumer's module:
+# The Arch/system-manager backend. Publishes the stance as pacman/AUR names for the host's own
+# reconciler, installs from nixpkgs ONLY the entries Arch has nothing for at all, and renders the
+# storage-pool apply units and the remote-connection aliases.
+#
+# THE ANTI-SHADOWING RULE THIS FILE ENFORCES, the same one nixfs's own Arch backend documents. On
+# a live Arch host `/usr/sbin` precedes the system-manager Nix profile on `PATH`, so a package
+# installed from nixpkgs into that profile when pacman ALSO has it does not add redundancy -- it
+# adds a copy that is never the one that runs, dead weight in every rebuild and a pin that means
+# nothing. So the line here is hard: an entry with a pacman name is PUBLISHED for the reconciler
+# and installed from nowhere by this module; an entry with no Arch source at all
+# (`unavailableOnArch`) is installed from nixpkgs and published nowhere else. No entry is ever
+# both. For this catalogue that leaves no residue today -- all 28 pacman names are in an official
+# repo -- so the nixpkgs path is exercised by a fixture in ../../checks/, not by a live row.
+#
+# The published lists are NOT wired to a reconciler here, on purpose -- the same reasoning the
+# sibling nixdev/nixoffice/nixfs Arch backends give: wiring one in would couple a general flake to
+# one deployment's package module. A host's own config connects them:
 #
 #   nixarch.packages.pacman = config.nixvm.host.archPackages;
 #   nixarch.packages.aur    = config.nixvm.host.aurPackages;
@@ -32,7 +45,7 @@
 # ad-hoc guests it created by hand -- which is the whole shape this plane exists for -- and
 # declaring persistent guests there is a capability that has not been built, rather than one that
 # was suppressed.
-{ lib, config, ... }:
+{ lib, config, pkgs, ... }:
 
 let
   cfg = config.nixvm.host;
@@ -40,12 +53,40 @@ let
   pools = import ../../lib/pools.nix { inherit lib; };
 
   zvolBackedPools = lib.filter (n: cfg.storagePools.${n}.zvolBacked) (lib.attrNames cfg.storagePools);
+
+  # The ONLY entries this backend may touch with nixpkgs: exactly the ones with no Arch source at
+  # all, never more. Filtered from `cfg.want` directly rather than re-derived from the published
+  # `unavailableOnArch` name list, so a bug that changed what gets INSTALLED here could not also
+  # quietly change what the option REPORTS -- nixfs's own backend draws the same distinction for
+  # the same reason.
+  nixpkgsOnly = lib.filter (t: (t.arch or null) == null && (t.nixpkgs or null) != null) cfg.want;
+  path = name: lib.splitString "." name;
+  resolves = t: lib.hasAttrByPath (path t.nixpkgs) pkgs;
+  missing = lib.filter (t: !(resolves t)) nixpkgsOnly;
 in
 {
   imports = [ ./vm-host.nix ];
 
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
+      environment.systemPackages =
+        map (t: lib.getAttrFromPath (path t.nixpkgs) pkgs) (lib.filter resolves nixpkgsOnly);
+
+      assertions = [
+        {
+          assertion = missing == [ ];
+          message = ''
+            nixvm: ${toString (builtins.length missing)} nixpkgs-only package(s) do not exist in
+            this nixpkgs: ${lib.concatStringsSep ", " (map (t: t.nixpkgs) missing)}.
+
+            These are entries with no Arch source at all, so nixpkgs is the only channel left for
+            them on this plane and there is nothing to fall back to. This is a catalogue problem,
+            not a host problem -- fix lib/toolchain.nix so every host gets the correction, rather
+            than pinning an older nixpkgs or omitting the entry on one machine.
+          '';
+        }
+      ];
+
       # `/usr/bin/virsh` rather than a store path: on this plane libvirt comes from the distro,
       # and the reconciler that installed it puts its binaries exactly there. A nix-provided
       # `virsh` would be a SECOND libvirt client talking to the distro daemon over a socket whose

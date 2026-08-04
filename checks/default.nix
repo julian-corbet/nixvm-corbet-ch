@@ -157,10 +157,31 @@ let
       specialArgs = { inherit pkgs; };
     }).config;
 
+  # Force everything this backend actually SETS, and nothing else.
+  #
+  # ⚠ NOT `builtins.deepSeq` on the whole `.config`, which is what this started as and which does
+  # not terminate the moment `environment.systemPackages` is non-empty: a package derivation is
+  # self-referential (`.all`, `.overrideAttrs`, `passthru`), so deep-forcing one recurses until
+  # Nix reports "stack overflow; max-call-depth exceeded" -- an explosion rather than a named
+  # failure, and one that would fire on a perfectly CORRECT config the day the catalogue gains
+  # its first `arch = null` row. So the package list is forced by LENGTH, which proves it was
+  # computed without walking into a derivation, and every other output is forced for real.
+  forceArch = c: builtins.deepSeq [
+    c.nixvm.host.archPackages
+    c.nixvm.host.aurPackages
+    c.nixvm.host.unavailableOnArch
+    (builtins.length c.environment.systemPackages)
+    (map (e: e.text) (lib.attrValues c.environment.etc))
+    (map (s: s.script) (lib.attrValues c.systemd.services))
+    (map (a: a.message) (lib.filter (a: !a.assertion) c.assertions))
+    c.warnings
+  ]
+    true;
+
   # `deepSeq` on `.config`, not `seq`: the undeclared-option error is raised while the module
   # system assembles `config`, and stopping at weak-head-normal-form would leave it unforced.
-  # Everything the stub declares is a cheap list or attrset, so this never drags a package
-  # closure in.
+  # Safe here in a way `forceArch` above is not: every probe below sets a handful of scalars and
+  # no module that could put a derivation in the result.
   planeEvalFails = modules:
     !(builtins.tryEval (builtins.deepSeq
       (lib.evalModules {
@@ -230,13 +251,20 @@ let
   pkgNames = cfg: map (p: p.pname or p.name or "?") cfg.environment.systemPackages;
 
   # ── Fixture entry tables for lib/resolve.nix, in the shapes lib/toolchain.nix lacks ──────────
-  # The real catalogue has no AUR entry at all, so `archPackages` and `aurPackages` return the
-  # identical result against it whether the split works or is a no-op -- see lib/resolve.nix's
-  # own header for why that makes a catalogue-only test worthless here.
+  #
+  # The real catalogue has no `aur = true` row and no `arch = null` row, so the AUR split and the
+  # nixpkgs-only-on-Arch split return identical results against it whether they work or are
+  # no-ops -- see lib/resolve.nix's own header for why that makes a catalogue-only test worthless
+  # for those two branches. These are the missing inputs.
   repoEntry = { name = "repo"; arch = "repo"; nixpkgs = "repo"; };
   aurEntry = { name = "aurthing"; arch = "aurthing"; aur = true; nixpkgs = "aurthing"; };
-  daemonEntry = { name = "daemonish"; arch = "daemonish"; nixpkgs = null; };
-  allEntries = [ repoEntry aurEntry daemonEntry ];
+  # The shape the real catalogue has no instance of: no Arch source at all, official repo or AUR.
+  # The one case where an Arch host may reach for nixpkgs, because no distro copy exists to race.
+  nixpkgsOnlyEntry = { name = "nowhereonarch"; arch = null; nixpkgs = "nowhereonarch"; };
+  # Exists in nixpkgs, but virtualisation.libvirtd delivers it there -- must be published for
+  # pacman and withheld from the NixOS install list.
+  viaLibvirtdEntry = { name = "daemonish"; arch = "daemonish"; nixpkgs = "daemonish"; viaLibvirtd = true; };
+  allEntries = [ repoEntry aurEntry nixpkgsOnlyEntry viaLibvirtdEntry ];
 
   # ── fact-wiring fixtures: `lib.probeFact` proven THROUGH the real `modules/guests` ──────
   #
@@ -757,7 +785,7 @@ let
         let names = pkgNames cfg-nixos-tools; in
         lib.elem "libvirt" names && lib.elem "qemu-host-cpu-only" names
       )
-      "the daemon rows are `nixpkgs = null` because virtualisation.libvirtd puts them on the system itself -- if that stops being true, the null becomes a genuine gap and this module ships a host with no libvirt. got: ${builtins.toJSON (pkgNames cfg-nixos-tools)}")
+      "the daemon rows are marked `viaLibvirtd` and therefore withheld from this module's own install list -- which is only safe while virtualisation.libvirtd really does put them on the system. If that stops being true the marking becomes a genuine gap and this module ships a host with no libvirt at all. got: ${builtins.toJSON (pkgNames cfg-nixos-tools)}")
 
     (check "tools/no-warning-on-todays-catalogue"
       (cfg-nixos-tools.warnings == [ ])
@@ -830,7 +858,10 @@ let
 
     # ...and the positive direction: the Arch backend, same stub, evaluates.
     (check "arch-plane/backend-evaluates-cleanly"
-      (builtins.tryEval (builtins.deepSeq arch-host true)).success
+      ((builtins.tryEval (forceArch arch-host)).success
+        && (builtins.tryEval (forceArch arch-tools)).success
+        && (builtins.tryEval (forceArch arch-foreign)).success
+        && (builtins.tryEval (forceArch arch-remote-only)).success)
       "modules/vm-host/arch.nix must evaluate against system-manager's own option surface -- if this fails, it is reaching for an option that plane does not have")
 
     (check "arch-plane/backend-sets-no-assertion-of-its-own-when-clean"
@@ -962,12 +993,43 @@ let
       (resolve.aurPackages allEntries == [ "aurthing" ])
       "got: ${builtins.toJSON (resolve.aurPackages allEntries)}")
 
-    # A null nixpkgs attribute is a POSITIVE statement here ("the libvirtd module delivers this"),
-    # unlike a null pacman name, which would be a catalogue defect. So it must be dropped from the
-    # nixpkgs list silently and NOT reported as a problem.
-    (check "resolve/nixpkgs-list-drops-null-attributes-silently"
-      (resolve.nixpkgsNames allEntries == [ "repo" "aurthing" ])
-      "got: ${builtins.toJSON (resolve.nixpkgsNames allEntries)}")
+    # The AUR is a valid ARCH source, not a fallback to nixpkgs: an `aur = true` entry must go to
+    # the AUR list and must NOT also be claimed as one Arch cannot deliver.
+    (check "resolve/an-aur-entry-is-not-unavailable-on-arch"
+      (!(lib.elem "aurthing" (resolve.unavailableOnArch allEntries)))
+      "got: ${builtins.toJSON (resolve.unavailableOnArch allEntries)}")
+
+    (check "resolve/unavailable-on-arch-is-exactly-the-entries-with-no-pacman-name"
+      (resolve.unavailableOnArch allEntries == [ "nowhereonarch" ])
+      "got: ${builtins.toJSON (resolve.unavailableOnArch allEntries)}")
+
+    # THE ARCH-SIDE ANTI-SHADOWING INVARIANT, as arithmetic: the pacman lists and the
+    # nixpkgs-only list are disjoint, and between them they account for every selected entry.
+    # No entry may fall in both (two copies of one tool) or in neither (silently undeliverable).
+    (check "resolve/every-entry-is-in-exactly-one-arch-channel"
+      (
+        let
+          pac = resolve.archPackages allEntries ++ resolve.aurPackages allEntries;
+          only = resolve.unavailableOnArch allEntries;
+          named = map (t: t.arch) (lib.filter (t: t.arch != null) allEntries);
+        in
+        lib.sort (a: b: a < b) pac == lib.sort (a: b: a < b) named
+        && lib.length pac + lib.length only == lib.length allEntries
+        && !(lib.any (t: (t.arch or null) != null && lib.elem t.name only) allEntries)
+      )
+      "pacman: ${builtins.toJSON (resolve.archPackages allEntries ++ resolve.aurPackages allEntries)} nixpkgs-only: ${builtins.toJSON (resolve.unavailableOnArch allEntries)}")
+
+    # TWO exclusions from the NixOS install list, meaning opposite things: `nixpkgs = null` is an
+    # entry nixpkgs has no package for; `viaLibvirtd` is one it HAS and that libvirtd already
+    # delivers. This fixture set has one of the latter and none of the former, so the check below
+    # pins the viaLibvirtd half specifically.
+    (check "resolve/nixpkgs-list-withholds-libvirtd-delivered-entries"
+      (resolve.nixpkgsPackages allEntries == [ "repo" "aurthing" "nowhereonarch" ])
+      "got: ${builtins.toJSON (resolve.nixpkgsPackages allEntries)}")
+
+    (check "resolve/nixpkgs-list-drops-entries-with-no-nixpkgs-attribute"
+      (resolve.nixpkgsPackages [ repoEntry { name = "noattr"; arch = "noattr"; nixpkgs = null; } ] == [ "repo" ])
+      "got: ${builtins.toJSON (resolve.nixpkgsPackages [ repoEntry { name = "noattr"; arch = "noattr"; nixpkgs = null; } ])}")
 
     (check "resolve/qemu-targets-keep-the-native-ones-and-deduplicate"
       (
@@ -988,21 +1050,86 @@ let
         && !(resolve.uriOk "qemu+ssh://root@h/system\nuri_default = \"x\""))
       "either character would end the entry early and change what the generated file means")
 
+    # ══ THE ANTI-SHADOWING INVARIANT, ON THE REAL CATALOGUE AND THE REAL HOSTS ════════════════
+    #
+    # The fixture-driven `resolve/*` checks above prove the arithmetic. These prove it about what
+    # is actually declared -- which is the claim that matters, and the one that a future
+    # catalogue edit could break without touching a single line of resolution code.
+
+    # The headline: on an Arch host, NOTHING comes from nixpkgs. Every selected entry has a live
+    # pacman source, so the system-manager backend installs an empty list -- checked through the
+    # real backend, not by reading the catalogue back.
+    (check "arch-plane/installs-nothing-from-nixpkgs"
+      (arch-tools.environment.systemPackages == [ ]
+        && arch-foreign.environment.systemPackages == [ ]
+        && arch-host.environment.systemPackages == [ ])
+      "on a live Arch host /usr/sbin precedes the system-manager Nix profile on PATH, so a nixpkgs copy of a package pacman also has is never the one that runs. got: ${builtins.toJSON (map (p: p.pname or p.name or "?") arch-tools.environment.systemPackages)}")
+
+    (check "arch-plane/nothing-in-todays-catalogue-is-unavailable-on-arch"
+      (arch-tools.nixvm.host.unavailableOnArch == [ ]
+        && arch-foreign.nixvm.host.unavailableOnArch == [ ])
+      "got: ${builtins.toJSON arch-tools.nixvm.host.unavailableOnArch}")
+
+    # ...and the coverage half of the same claim: the two pacman lists between them name every
+    # selected entry, so nothing is silently undeliverable on that plane either.
+    (check "arch-plane/pacman-lists-cover-every-selected-entry"
+      (
+        let
+          c = arch-tools.nixvm.host;
+          named = lib.unique (map (t: t.arch) (lib.filter (t: t.arch != null) c.want));
+        in
+        lib.sort (a: b: a < b) (c.archPackages ++ c.aurPackages) == lib.sort (a: b: a < b) named
+        && lib.length c.want > 0
+      )
+      "archPackages ++ aurPackages: ${builtins.toJSON (arch-tools.nixvm.host.archPackages ++ arch-tools.nixvm.host.aurPackages)}")
+
+    # The NixOS half of the same invariant, on the real catalogue: the libvirtd-delivered rows are
+    # excluded from the install list even though every one of them names a real nixpkgs attribute.
+    (check "tools/no-libvirtd-delivered-row-reaches-the-nixos-install-list"
+      (
+        let
+          viaNames = map (t: t.nixpkgs) (lib.filter (t: t.viaLibvirtd or false) (lib.attrValues cat.daemon));
+        in
+        viaNames != [ ] && !(lib.any (n: lib.elem n cfg-nixos-tools.nixvm.host.nixpkgsPackages) viaNames)
+      )
+      "these rows name real nixpkgs attributes -- ${builtins.toJSON (map (t: t.nixpkgs) (lib.attrValues cat.daemon))} -- and installing them alongside virtualisation.libvirtd would put a second, differently-configured QEMU in the closure that nothing ever execs. got: ${builtins.toJSON cfg-nixos-tools.nixvm.host.nixpkgsPackages}")
+
     # ══ The catalogue's own shape, so a future edit cannot silently break the above ═══════════
-    (check "catalogue/every-entry-has-a-pacman-name"
+    (check "catalogue/every-entry-names-itself-on-both-channels"
       (
         let entries = lib.concatMap lib.attrValues [ cat.daemon cat.tools cat.architectures ]; in
-        lib.all (t: (t.arch or null) != null) entries
+        lib.all (t: (t ? arch) && (t ? nixpkgs)) entries
       )
-      "the Arch plane is the only one that resolves a catalogue row to a package name at all; a row without one is deliverable by nothing there")
+      "both fields must be PRESENT on every row even when one of them is null -- an absent field is a question nobody answered, a null is an answer")
 
-    (check "catalogue/daemon-rows-carry-no-nixpkgs-attribute"
-      (lib.all (t: (t.nixpkgs or null) == null) (lib.attrValues cat.daemon))
-      "every daemon row is delivered on NixOS by virtualisation.libvirtd itself -- a nixpkgs attribute here would put a second copy in systemPackages and give one fact two owners")
+    (check "catalogue/no-row-is-deliverable-by-nothing"
+      (
+        let entries = lib.concatMap lib.attrValues [ cat.daemon cat.tools cat.architectures ]; in
+        lib.all (t: (t.arch or null) != null || (t.nixpkgs or null) != null) entries
+      )
+      "a row with neither a pacman name nor a nixpkgs attribute resolves to silence on both planes")
 
-    (check "catalogue/every-tool-row-carries-a-nixpkgs-attribute"
-      (lib.all (t: (t.nixpkgs or null) != null) (lib.attrValues cat.tools))
-      "a selectable tool with no nixpkgs attribute would resolve to silence on the NixOS plane -- the host would declare it and not get it")
+    # `nixpkgs = null` is only honest when something else on the NixOS plane delivers the entry.
+    # For the architecture rows that something is the qemu package's own --target-list; a future
+    # row with neither would be declarable and undeliverable there.
+    (check "catalogue/a-null-nixpkgs-attribute-is-always-explained"
+      (
+        let entries = lib.concatMap lib.attrValues [ cat.daemon cat.tools cat.architectures ]; in
+        lib.all (t: (t.nixpkgs or null) != null || (t.viaLibvirtd or false)) entries
+      )
+      "every row without a nixpkgs attribute must say how NixOS gets it instead")
+
+    (check "catalogue/daemon-rows-name-a-real-nixpkgs-attribute-and-are-marked-viaLibvirtd"
+      (lib.all (t: (t.nixpkgs or null) != null && (t.viaLibvirtd or false)) (lib.attrValues cat.daemon))
+      "the daemon rows exist in nixpkgs and must say so -- what makes them special is not absence but that virtualisation.libvirtd is what delivers them, which is `viaLibvirtd`, not a null")
+
+    (check "catalogue/every-tool-row-carries-a-nixpkgs-attribute-and-is-not-viaLibvirtd"
+      (lib.all (t: (t.nixpkgs or null) != null && !(t.viaLibvirtd or false)) (lib.attrValues cat.tools))
+      "a selectable tool with no nixpkgs attribute would resolve to silence on the NixOS plane; one marked viaLibvirtd would be withheld from the install list and never arrive at all")
+
+    (check "catalogue/every-architecture-row-has-a-pacman-name-and-no-nixpkgs-package"
+      (lib.all (a: (a.arch or null) != null && (a.nixpkgs or null) == null) (lib.attrValues cat.architectures))
+      "nixpkgs ships no per-architecture qemu package -- naming one would be inventing a fact; the Arch plane is the only one where a foreign architecture IS a package")
 
     (check "catalogue/every-architecture-row-names-at-least-one-qemu-target"
       (lib.all (a: (a.qemuTargets or [ ]) != [ ]) (lib.attrValues cat.architectures))
