@@ -38,7 +38,11 @@
 # Nothing here builds a VM, starts libvirtd, or runs a single line of the rendered
 # script. That is exactly the boundary this repo exists to keep: nixvm declares and
 # renders, `nix flake check` proves the declaring and rendering, and nothing more.
-{ pkgs, lib, system, vmHostModule, guestsModule, archModule }:
+# `pkgs` is the platform UNDER TEST; `buildPkgs` is the platform this check's own marker
+# derivation is built on. They differ whenever one machine evaluates another architecture's module
+# set, which is the point -- see flake.nix's `checks` comment for the "platform mismatch" failure
+# that split fixes.
+{ buildPkgs, pkgs, lib, system, vmHostModule, guestsModule, archModule }:
 
 let
   domainXml = import ../lib/domain-xml.nix { inherit lib; };
@@ -198,9 +202,19 @@ let
   # eval error, which reports nothing about which property broke.
   targetListStr = cfg: lib.concatStringsSep " " (targetListOf cfg);
 
+  # Computed from the evaluation's own platform, never spelled "i386-softmmu,x86_64-softmmu":
+  # this flake declares aarch64-linux as well, CI runs `nix flake check --all-systems`, and a
+  # check that hard-codes one host architecture's targets fails on the other for a reason that
+  # has nothing to do with the property it is testing.
+  expectedNativeTargets =
+    lib.optional pkgs.stdenv.hostPlatform.isx86_64 "i386-softmmu"
+    ++ [ "${pkgs.stdenv.hostPlatform.qemuArch}-softmmu" ];
+
+  # s390x is native on no system this flake declares, so it is a safe stand-in for "a foreign
+  # architecture" on every one of them. riscv and mips serve as the negatives for the same reason.
   cfg-nixos-default-arch = evalNixos [{ nixvm.host = { enable = true; bridge = "examplebr0"; }; }];
   cfg-nixos-foreign-arch = evalNixos [{
-    nixvm.host = { enable = true; bridge = "examplebr0"; foreignArchitectures = [ "aarch64" ]; };
+    nixvm.host = { enable = true; bridge = "examplebr0"; foreignArchitectures = [ "s390x" ]; };
   }];
   cfg-nixos-tools = evalNixos [{
     nixvm.host = { enable = true; bridge = "examplebr0"; tools = [ "manager" "installer" "viewer" ]; };
@@ -672,12 +686,12 @@ let
       ((qemuOf cfg-nixos-default-arch).pname == "qemu-host-cpu-only")
       "expected the empty foreignArchitectures default to resolve to pkgs.qemu_kvm (pname qemu-host-cpu-only), which has a binary cache behind it; got pname: ${(qemuOf cfg-nixos-default-arch).pname}")
 
-    (check "arch-select/default-target-list-carries-no-foreign-target"
-      (
-        let tl = targetListOf cfg-nixos-default-arch; in
-        tl != [ ] && !(lib.any (f: lib.hasInfix "aarch64-softmmu" f || lib.hasInfix "riscv" f || lib.hasInfix "s390x" f) tl)
-      )
-      "got target-list flags: ${builtins.toJSON (targetListOf cfg-nixos-default-arch)}")
+    # Equality, not "does not contain aarch64": the default must be the host's own targets and
+    # NOTHING else, and only an exact comparison says that about all thirty of them at once.
+    (check "arch-select/default-target-list-is-exactly-the-hosts-own"
+      (targetListOf cfg-nixos-default-arch
+        == [ "--target-list=${lib.concatStringsSep "," expectedNativeTargets}" ])
+      "expected exactly ${builtins.toJSON expectedNativeTargets} for this host platform; got: ${builtins.toJSON (targetListOf cfg-nixos-default-arch)}")
 
     # The failure this catches is the easy mistake: reaching for `pkgs.qemu` when someone asks
     # for a foreign architecture. That "works" -- it does include aarch64 -- while also shipping
@@ -689,16 +703,15 @@ let
     (check "arch-select/opting-in-adds-exactly-the-named-target"
       (
         let tl = targetListStr cfg-nixos-foreign-arch; in
-        lib.hasInfix "aarch64-softmmu" tl
-        && lib.hasInfix "x86_64-softmmu" tl
+        lib.hasInfix "s390x-softmmu" tl
         && !(lib.hasInfix "riscv" tl)
-        && !(lib.hasInfix "s390x" tl)
+        && !(lib.hasInfix "mips" tl)
       )
-      "got: ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")
+      "one architecture was named; the others in the catalogue must not come along with it. got: ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")
 
     (check "arch-select/the-hosts-own-targets-survive-opting-in"
-      (lib.hasInfix "i386-softmmu" (targetListStr cfg-nixos-foreign-arch))
-      "asking for a foreign architecture must ADD to the host's own targets, never replace them -- a host that can no longer run its own architecture is not a hypervisor. got: ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")
+      (lib.all (t: lib.hasInfix t (targetListStr cfg-nixos-foreign-arch)) expectedNativeTargets)
+      "asking for a foreign architecture must ADD to the host's own targets, never replace them -- a host that can no longer run its own architecture is not a hypervisor. expected all of ${builtins.toJSON expectedNativeTargets} in ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")
 
     # ══ TOOLING -- NixOS plane ════════════════════════════════════════════════════════════════
     #
@@ -1085,10 +1098,10 @@ then
     ${report}
   ''
 else {
-  eval-tests = pkgs.runCommand "nixvm-eval-tests"
+  eval-tests = buildPkgs.runCommand "nixvm-eval-tests-${system}"
     { passedCount = toString (builtins.length allResults); }
     ''
-      echo "all $passedCount nixvm eval tests passed"
+      echo "all $passedCount nixvm eval tests passed for ${system}"
       touch $out
     '';
 }

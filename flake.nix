@@ -66,14 +66,37 @@
       lib.toolchain = import ./lib/toolchain.nix { };
       lib.resolve = import ./lib/resolve.nix { inherit lib; };
 
-      checks = forAllSystems (system:
-        import ./checks {
-          pkgs = nixpkgs.legacyPackages.${system};
-          inherit lib system;
-          vmHostModule = self.nixosModules.vm-host;
-          guestsModule = self.nixosModules.guests;
-          archModule = self.systemManagerModules.vm-host;
-        });
+      # EVERY declared system's checks, evaluated from EVERY build platform -- so
+      # `checks.x86_64-linux` contains both `eval-tests` (this platform) and
+      # `eval-tests-aarch64-linux`, and vice versa.
+      #
+      # WHY, since it looks like duplication. These are pure EVAL tests, and evaluating a module
+      # set for aarch64 needs no aarch64 machine -- but the marker derivation they hang off
+      # inherits the platform of whatever `pkgs` built it, so exposing them only under their own
+      # system meant `checks.aarch64-linux.eval-tests` could not be BUILT anywhere except on
+      # aarch64. `nix flake check --all-systems` on any ordinary x86_64 runner therefore failed
+      # with "platform mismatch" -- not a failing check, a check that could not run, which is the
+      # same colour of red and a much worse signal.
+      #
+      # Splitting the two `pkgs` fixes it properly rather than hiding it: the module eval takes
+      # the TARGET platform's package set (so the architecture-selection checks really do see an
+      # aarch64 host's own QEMU targets), and the marker derivation takes the BUILD platform's.
+      # One x86_64 runner now genuinely proves both targets, which `--all-systems` never did.
+      checks = forAllSystems (buildSystem:
+        lib.listToAttrs (map
+          (target: {
+            name = if target == buildSystem then "eval-tests" else "eval-tests-${target}";
+            value = (import ./checks {
+              buildPkgs = nixpkgs.legacyPackages.${buildSystem};
+              pkgs = nixpkgs.legacyPackages.${target};
+              system = target;
+              inherit lib;
+              vmHostModule = self.nixosModules.vm-host;
+              guestsModule = self.nixosModules.guests;
+              archModule = self.systemManagerModules.vm-host;
+            }).eval-tests;
+          })
+          systems));
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };

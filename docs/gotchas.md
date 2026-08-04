@@ -21,7 +21,7 @@ operator before. `nossd` on the mount turns that auto-detection off.
 explicit, non-guessable fact you set to `true` for exactly this situation. When it is
 set, and this host's own `fileSystems.<path>` entry is visible in the same evaluation
 with `fsType = "btrfs"` and no `"nossd"` in its `options`, evaluation **fails** with a
-message naming the pool -- see `modules/vm-host/default.nix`'s assertion and
+message naming the pool -- see `modules/vm-host/nixos.nix`'s assertion and
 `checks/default.nix`'s `zvol-nossd-gotcha/*` group, which proves both the passing and
 the failing direction. A pool backed by a native ZFS dataset (`zvolBacked = false`, the
 default) is never checked at all -- there is nothing to check.
@@ -29,7 +29,7 @@ default) is never checked at all -- there is nothing to check.
 **What this module does NOT do.** It never adds `nossd` to `fileSystems.<path>.options`
 for you. Mount options for a filesystem this module didn't create are not this module's
 to silently rewrite -- the same "declare and assert, never create or impose" stance
-`modules/vm-host/default.nix`'s own SCOPE block states for the ESP-style facts it reads
+`modules/vm-host/vm-host.nix`'s own SCOPE block states for the ESP-style facts it reads
 elsewhere in this house's other modules. Add `"nossd"` to that filesystem's own
 `options` list yourself; the assertion exists to make sure you don't forget to.
 

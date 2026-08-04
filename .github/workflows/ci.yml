@@ -16,16 +16,24 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # --all-systems is NOT optional here, and is the whole reason this file spells the command
-      # out rather than running a bare `nix flake check`.
+      # NO --all-systems, and that is the opposite of what this file used to say, so here is why.
       #
-      # Without it, `nix flake check` evaluates only the checks for the RUNNER's own system and
-      # prints "omitted these incompatible systems" as a warning — then exits 0. Every other system
-      # this flake declares goes unevaluated while CI reports green, which is a check that passed
-      # having tested nothing. That failure mode is the one this repo exists to make impossible, so
-      # it would be absurd to ship it here.
+      # The worry it was written against is real: a bare `nix flake check` evaluates only the
+      # checks for the RUNNER's own system, prints "omitted these incompatible systems" as a
+      # warning, and exits 0 — every other declared system unevaluated while CI reports green.
       #
-      # `systems` in flake.nix is deliberately narrow so this can be strict: only platforms that
-      # can genuinely be evaluated are declared, and all of them really are.
-      - name: nix flake check (all systems)
-        run: nix flake check --all-systems --print-build-logs
+      # But --all-systems did not fix that, it only made the failure louder in the wrong place.
+      # These checks are pure EVALUATION, yet the marker derivation each one hangs off inherits
+      # the platform of the package set that built it, so `checks.aarch64-linux.eval-tests` could
+      # not be BUILT on an x86_64 runner at all: --all-systems died on "platform mismatch" before
+      # evaluating anything. A check that cannot run is the same colour of red as a check that
+      # failed, and a much worse signal.
+      #
+      # flake.nix now exposes every declared system's evaluation under EVERY build platform
+      # (`checks.x86_64-linux.eval-tests` and `.eval-tests-aarch64-linux`, and the mirror image on
+      # aarch64), splitting the platform under test from the platform doing the building. So this
+      # ONE runner really does evaluate both targets — including the architecture-selection checks,
+      # which see a genuine aarch64 host's own QEMU targets — which is what --all-systems was
+      # reaching for and never delivered.
+      - name: nix flake check
+        run: nix flake check --print-build-logs
