@@ -737,6 +737,27 @@ let
       )
       "one architecture was named; the others in the catalogue must not come along with it. got: ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")
 
+    # ── selecting `images` must not widen the DECLARED architecture stance ────────────────────
+    #
+    # `guestfs-tools` pulls libguestfs, which pulls the top-level all-targets `qemu` (~965 MiB)
+    # into the closure -- measured, and accepted on a host with the space for it. What must NOT
+    # follow from that is the hypervisor quietly running it: libvirtd execs
+    # `virtualisation.libvirtd.qemu.package`, and that stays the x86-only build regardless of what
+    # a tool drags in beside it. The two facts are independent and this check is what keeps them
+    # that way -- a future backend that "simplified" by pointing libvirtd at the qemu already in
+    # the closure would pass every other check here.
+    (check "arch-select/selecting-images-does-not-widen-the-declared-stance"
+      (
+        let
+          cfg = evalNixos [{
+            nixvm.host = { enable = true; bridge = "examplebr0"; tools = [ "images" ]; };
+          }];
+        in
+        (qemuOf cfg).pname == "qemu-host-cpu-only"
+        && targetListOf cfg == [ "--target-list=${lib.concatStringsSep "," expectedNativeTargets}" ]
+      )
+      "a tool's own closure may contain another qemu; the one libvirtd EXECS must still be the host-cpu-only build")
+
     (check "arch-select/the-hosts-own-targets-survive-opting-in"
       (lib.all (t: lib.hasInfix t (targetListStr cfg-nixos-foreign-arch)) expectedNativeTargets)
       "asking for a foreign architecture must ADD to the host's own targets, never replace them -- a host that can no longer run its own architecture is not a hypervisor. expected all of ${builtins.toJSON expectedNativeTargets} in ${builtins.toJSON (targetListOf cfg-nixos-foreign-arch)}")

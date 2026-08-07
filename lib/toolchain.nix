@@ -125,13 +125,27 @@
     # booting it first. Pairs with `cloudInit` below; between them, "a little VM for something"
     # is a download and two commands instead of an OS install.
     #
-    # ⚠ EXPENSIVE ON NixOS, and the cost is not in this package: `guestfs-tools` pulls
-    # `libguestfs`, which pulls its 4 GiB appliance AND the top-level all-targets `qemu` (~965
-    # MiB) -- reintroducing, through a side door, exactly the QEMU `foreignArchitectures` keeps
-    # out of `virtualisation.libvirtd.qemu.package`. Nothing in this catalogue can prevent that;
-    # it is libguestfs's own dependency. Stated here so a consumer selecting `images` on a NixOS
-    # host is deciding to pay ~5 GiB of closure, not discovering it afterwards. On Arch the same
-    # tools cost 6.9 MiB, because the distro's libguestfs shares the system QEMU.
+    # ⚠ THE TWO PLANES DISAGREE ABOUT WHAT THIS COSTS BY THREE ORDERS OF MAGNITUDE, and the
+    # reason is a packaging difference worth knowing before selecting it on a space-constrained
+    # host. Both figures are measured, not estimated.
+    #
+    #   NixOS  ~5.0 GiB of closure. `guestfs-tools` pulls `libguestfs`, which pulls a PREBUILT
+    #          4 GiB appliance derivation AND the top-level all-targets `qemu` (~965 MiB) --
+    #          reintroducing, through a side door, exactly the QEMU `foreignArchitectures` keeps
+    #          out of `virtualisation.libvirtd.qemu.package`. `nix why-depends` names the chain:
+    #          system-path -> guestfs-tools -> libguestfs -> qemu. Nothing in this catalogue can
+    #          prevent it; it is libguestfs's own dependency, and it does NOT widen the declared
+    #          architecture stance -- the QEMU libvirtd execs is still the x86-only one.
+    #
+    #   Arch   36 MiB of packages (libguestfs 6.9 + guestfs-tools 29.2), and NO second QEMU at
+    #          all: the `qemu` its libguestfs depends on is a virtual provide already satisfied
+    #          by `qemu-base`, which the `daemon.qemu` row above pulls in via `qemu-desktop`.
+    #          There is no shipped appliance either -- Arch builds one with supermin on first use
+    #          (/usr/lib/guestfs/supermin.d is 2.4 MiB of manifests) from the host's OWN installed
+    #          packages, cached under /var/tmp/.guestfs-$UID and rebuilt when those change.
+    #
+    # So the same selection is a rounding error on a distro host and a real decision on a NixOS
+    # one. Stated here rather than left for a consumer to discover after a deploy.
     images = { arch = "guestfs-tools"; nixpkgs = "guestfs-tools"; };
 
     # `cloud-localds`: builds the NoCloud seed ISO a cloud image reads its user-data from. The
